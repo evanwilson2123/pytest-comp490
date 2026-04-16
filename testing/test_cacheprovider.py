@@ -135,6 +135,25 @@ class TestNewAPI:
         assert result.ret == 0
         result.stdout.fnmatch_lines(["*1 passed*"])
 
+    def test_config_cache_is_none_when_disabled(self, pytester: Pytester) -> None:
+        pytester.makeconftest(
+            """
+            def pytest_configure(config):
+                assert hasattr(config, "cache")
+                assert config.cache is None
+        """
+        )
+        pytester.makepyfile(
+            """
+            def test_session(pytestconfig):
+                assert hasattr(pytestconfig, "cache")
+                assert pytestconfig.cache is None
+        """
+        )
+        result = pytester.runpytest("-p", "no:cacheprovider")
+        assert result.ret == 0
+        result.stdout.fnmatch_lines(["*1 passed*"])
+
     def test_cachefuncarg(self, pytester: Pytester) -> None:
         pytester.makepyfile(
             """
