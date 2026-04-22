@@ -1052,7 +1052,7 @@ class Config:
         TESTPATHS = enum.auto()
 
     # Set by cacheprovider plugin.
-    cache: Cache
+    cache: Cache | None
 
     def __init__(
         self,
@@ -1102,6 +1102,7 @@ class Config:
         self._inicache: dict[str, Any] = {}
         self._inicfg: ConfigDict = {}
         self._cleanup_stack = contextlib.ExitStack()
+        self.cache = None
         self.pluginmanager.register(self, "pytestconfig")
         self._configured = False
         self.hook.pytest_addoption.call_historic(

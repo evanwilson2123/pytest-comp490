@@ -202,6 +202,8 @@ pytest ``config`` object.  Here is a basic example plugin which
 implements a :ref:`fixture <fixture>` which reuses previously created state
 across pytest invocations:
 
+If the ``cacheprovider`` plugin is disabled, ``pytestconfig.cache`` will be ``None``.
+
 .. code-block:: python
 
     # content of test_caching.py
@@ -214,11 +216,15 @@ across pytest invocations:
 
     @pytest.fixture
     def mydata(pytestconfig):
-        val = pytestconfig.cache.get("example/value", None)
+        cache = pytestconfig.cache
+        if cache is None:
+            return None
+
+        val = cache.get("example/value", None)
         if val is None:
             expensive_computation()
             val = 42
-            pytestconfig.cache.set("example/value", val)
+            cache.set("example/value", val)
         return val
 
 
