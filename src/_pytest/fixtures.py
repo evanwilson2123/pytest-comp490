@@ -1677,7 +1677,12 @@ class FixtureManager:
 
     def _getusefixturesnames(self, node: nodes.Item) -> Iterator[str]:
         """Return the names of usefixtures fixtures applicable to node."""
-        for marker_node, mark in node.iter_markers_with_node(name="usefixtures"):
+        # Reverse order (farthest to closest) is more natural for usefixtures,
+        # i.e. Want a module-level usefixture to be requested before class one,
+        # a parent class' before a child's, etc.
+        for marker_node, mark in reversed(
+            list(node.iter_markers_with_node(name="usefixtures"))
+        ):
             if not mark.args:
                 marker_node.warn(
                     PytestWarning(
