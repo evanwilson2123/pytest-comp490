@@ -50,6 +50,10 @@ class _HiddenParam(enum.Enum):
 HIDDEN_PARAM = _HiddenParam.token
 
 
+# Allowed types for parameter set ids across pytest's public API.
+IdType = None | str | float | int | bool | _HiddenParam
+
+
 def istestfunc(func) -> bool:
     return callable(func) and getattr(func, "__name__", "<lambda>") != "<lambda>"
 
@@ -107,14 +111,14 @@ class ParameterSet(NamedTuple):
 
     values: Sequence[object | NotSetType]
     marks: Collection[MarkDecorator | Mark]
-    id: str | _HiddenParam | None
+    id: IdType
 
     @classmethod
     def param(
         cls,
         *values: object,
         marks: MarkDecorator | Collection[MarkDecorator | Mark] = (),
-        id: str | _HiddenParam | None = None,
+        id: IdType = None,
     ) -> ParameterSet:
         if isinstance(marks, MarkDecorator):
             marks = (marks,)
@@ -530,7 +534,7 @@ if TYPE_CHECKING:
             argvalues: Collection[ParameterSet | Sequence[object] | object],
             *,
             indirect: bool | Sequence[str] = ...,
-            ids: Iterable[None | str | float | int | bool]
+            ids: Iterable[IdType]
             | Callable[[Any], object | None]
             | None = ...,
             scope: _ScopeName | None = ...,
@@ -547,7 +551,7 @@ if TYPE_CHECKING:
             argvalues: Iterable[ParameterSet | Sequence[object] | object],
             *,
             indirect: bool | Sequence[str] = ...,
-            ids: Iterable[None | str | float | int | bool]
+            ids: Iterable[IdType]
             | Callable[[Any], object | None]
             | None = ...,
             scope: _ScopeName | None = ...,
