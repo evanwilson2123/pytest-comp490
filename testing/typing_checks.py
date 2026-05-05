@@ -35,6 +35,12 @@ def check_parametrize_ids_callable(func) -> None:
     pass
 
 
+# Issue #14234.
+@pytest.mark.parametrize("x", [1, 2], ids=[pytest.HIDDEN_PARAM, "visible"])
+def check_parametrize_ids_hidden_param(x: int) -> None:
+    pass
+
+
 # Issue #10999.
 def check_monkeypatch_typeddict(monkeypatch: MonkeyPatch) -> None:
     from typing import TypedDict
