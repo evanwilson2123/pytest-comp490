@@ -89,7 +89,6 @@ class TestSetattrWithImportPath:
             mp.setattr("os.path.qweqwe", 42, raising=False)
             assert os.path.qweqwe == 42  # type: ignore
 
-
     def test_setattr_failure_does_not_corrupt_undo(self, monkeypatch: MonkeyPatch) -> None:
         """If setattr raises (e.g. target doesn't support attribute setting), the undo stack should not contain a stale entry that crashes during teardown (#14161)"""
         class Immutable:
