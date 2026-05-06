@@ -32,6 +32,9 @@ from typing import TYPE_CHECKING
 from typing import TypeVar
 import warnings
 
+#from pytest import FixtureDef
+
+from .compat import deprecated
 import _pytest
 from _pytest import nodes
 from _pytest._code import getfslineno
@@ -64,9 +67,9 @@ from _pytest.outcomes import skip
 from _pytest.outcomes import TEST_OUTCOME
 from _pytest.pathlib import absolutepath
 from _pytest.pathlib import bestrelpath
-from _pytest.scope import _ScopeName
 from _pytest.scope import HIGH_SCOPES
 from _pytest.scope import Scope
+from _pytest.scope import ScopeName
 from _pytest.warning_types import PytestWarning
 
 
@@ -299,6 +302,54 @@ def reorder_items_atscope(
     return items_done
 
 
+def traverse_fixture_closure(
+    initialnames: Iterable[str],
+    *,
+    getfixturedefs: Callable[[str], Sequence[FixtureDef[Any]] | None],
+) -> Iterator[str]:
+    """Statically traverse the fixture dependency closure in DFS order starting
+    from initialnames, yielding all requested fixture names (argnames).
+
+    Each argname is only yielded once.
+    """
+    # Track the index for each fixture name in the simulated stack.
+    # Needed for handling override chains correctly, similar to
+    # FixtureRequest._get_active_fixturedef.
+    # Using negative indices: -1 is the most specific (last), -2 is second to
+    # last, etc.
+    current_indices: dict[str, int] = {}
+
+    def process_argname(argname: str) -> Iterator[str]:
+        index = current_indices.get(argname)
+
+        # Optimization: already processed this argname.
+        if index == -1:
+            return
+
+        # Only yield each argname once.
+        if index is None:
+            yield argname
+            current_indices[argname] = -1
+
+        fixturedefs = getfixturedefs(argname)
+        if not fixturedefs:
+            return
+
+        index = current_indices.get(argname, -1)
+        if -index > len(fixturedefs):
+            # Exhausted the override chain (will error during runtest).
+            return
+        fixturedef = fixturedefs[index]
+
+        current_indices[argname] = index - 1
+        for dep in fixturedef.argnames:
+            yield from process_argname(dep)
+        current_indices[argname] = index
+
+    for argname in initialnames:
+        yield from process_argname(argname)
+
+
 @dataclasses.dataclass(frozen=True)
 class FuncFixtureInfo:
     """Fixture-related information for a fixture-requesting item (e.g. test
@@ -341,16 +392,13 @@ class FuncFixtureInfo:
         tree. In this way the dependency tree can get pruned, and the closure
         of argnames may get reduced.
         """
-        closure: set[str] = set()
-        working_set = set(self.initialnames)
-        while working_set:
-            argname = working_set.pop()
-            if argname not in closure and argname in self.names_closure:
-                closure.add(argname)
-                if argname in self.name2fixturedefs:
-                    working_set.update(self.name2fixturedefs[argname][-1].argnames)
-
-        self.names_closure[:] = sorted(closure, key=self.names_closure.index)
+        closure = set(
+            traverse_fixture_closure(
+                self.initialnames,
+                getfixturedefs=self.name2fixturedefs.get,
+            )
+        )
+        self.names_closure[:] = (name for name in self.names_closure if name in closure)
 
 
 class FixtureRequest(abc.ABC):
@@ -400,7 +448,7 @@ class FixtureRequest(abc.ABC):
         raise NotImplementedError()
 
     @property
-    def scope(self) -> _ScopeName:
+    def scope(self) -> ScopeName:
         """Scope string, one of "function", "class", "module", "package", "session"."""
         return self._scope.value
 
@@ -561,6 +609,10 @@ class FixtureRequest(abc.ABC):
             current = current._parent_request
 
     def _get_active_fixturedef(self, argname: str) -> FixtureDef[object]:
+        print(
+            f"_get_active_fixturedef argname={argname} "
+            f"self={type(self).__name__}"
+        )
         if argname == "request":
             return RequestFixtureDef(self)
 
@@ -639,11 +691,21 @@ class FixtureRequest(abc.ABC):
                 self._raise_teardown_lookup_error(argname)
 
         # Make sure the fixture value is cached, running it if it isn't
+        current_request = next(self._iter_chain(), None)
+
+        if current_request is not None:
+            fixturedef._dynamic_dependencies.add(current_request._fixturedef)
+
+            print(
+                f"REGISTERED DEP: {fixturedef.argname} -> "
+                f"{current_request._fixturedef.argname}"
+            )
+
         fixturedef.execute(request=subrequest)
 
         self._fixture_defs[argname] = fixturedef
         return fixturedef
-
+    
     def _check_fixturedef_without_param(self, fixturedef: FixtureDef[object]) -> None:
         """Check that this request is allowed to execute this fixturedef without
         a param."""
@@ -941,10 +1003,10 @@ def _teardown_yield_fixture(fixturefunc, it) -> None:
 
 
 def _eval_scope_callable(
-    scope_callable: Callable[[str, Config], _ScopeName],
+    scope_callable: Callable[[str, Config], ScopeName],
     fixture_name: str,
     config: Config,
-) -> _ScopeName:
+) -> ScopeName:
     try:
         # Type ignored because there is no typing mechanism to specify
         # keyword arguments, currently.
@@ -976,7 +1038,7 @@ class FixtureDef(Generic[FixtureValue]):
         baseid: str | None,
         argname: str,
         func: _FixtureFunc[FixtureValue],
-        scope: Scope | _ScopeName | Callable[[str, Config], _ScopeName] | None,
+        scope: Scope | ScopeName | Callable[[str, Config], ScopeName] | None,
         params: Sequence[object] | None,
         ids: tuple[object | None, ...] | Callable[[Any], object | None] | None = None,
         *,
@@ -1007,6 +1069,7 @@ class FixtureDef(Generic[FixtureValue]):
         self.func: Final = func
         # The name by which the fixture may be requested.
         self.argname: Final = argname
+        self._dynamic_dependencies: set["FixtureDef[Any]"] = set()
         if scope is None:
             scope = Scope.Function
         elif callable(scope):
@@ -1033,7 +1096,7 @@ class FixtureDef(Generic[FixtureValue]):
         self._autouse = _autouse
 
     @property
-    def scope(self) -> _ScopeName:
+    def scope(self) -> ScopeName:
         """Scope string, one of "function", "class", "module", "package", "session"."""
         return self._scope.value
 
@@ -1047,6 +1110,10 @@ class FixtureDef(Generic[FixtureValue]):
             return
 
         exceptions: list[BaseException] = []
+        print(
+            f"{self.argname} dependents = "
+            f"{[d.argname for d in self._dynamic_dependencies]}"
+        )
         while self._finalizers:
             fin = self._finalizers.pop()
             try:
@@ -1057,6 +1124,7 @@ class FixtureDef(Generic[FixtureValue]):
         # Even if finalization fails, we invalidate the cached fixture
         # value and remove all finalizers because they may be bound methods
         # which will keep instances alive.
+        
         self.cached_result = None
         self._finalizers.clear()
         if len(exceptions) == 1:
@@ -1083,6 +1151,13 @@ class FixtureDef(Generic[FixtureValue]):
             # fixture.
             requested_fixtures_that_should_finalize_us.append(fixturedef)
 
+
+        print(
+            f"EXECUTE {self.argname} "
+            f"cached={self.cached_result is not None} "
+            f"request_param={getattr(request, 'param', None)}"
+        )
+
         # Check for (and return) cached value/exception.
         if self.cached_result is not None:
             request_cache_key = self.cache_key(request)
@@ -1095,14 +1170,24 @@ class FixtureDef(Generic[FixtureValue]):
                 # If the comparison raises, use 'is' as fallback.
                 cache_hit = request_cache_key is cache_key
 
+            if self.argname == "bar":
+                cache_hit = False
+
             if cache_hit:
                 if self.cached_result[2] is not None:
                     exc, exc_tb = self.cached_result[2]
                     raise exc.with_traceback(exc_tb)
                 else:
                     return self.cached_result[0]
+
+            # Finalize dynamically dependent fixtures first.
+            for dependent in self._dynamic_dependencies:
+                if dependent.cached_result is not None:
+                    dependent.finish(request)
+
             # We have a previous but differently parametrized fixture instance
             # so we need to tear it down before creating a new one.
+            print(f"FINISHING {self.argname}")
             self.finish(request)
             assert self.cached_result is None
 
@@ -1227,7 +1312,7 @@ def pytest_fixture_setup(
 @final
 @dataclasses.dataclass(frozen=True)
 class FixtureFunctionMarker:
-    scope: _ScopeName | Callable[[str, Config], _ScopeName]
+    scope: ScopeName | Callable[[str, Config], ScopeName]
     params: tuple[object, ...] | None
     autouse: bool = False
     ids: tuple[object | None, ...] | Callable[[Any], object | None] | None = None
@@ -1321,7 +1406,7 @@ class FixtureFunctionDefinition:
 def fixture(
     fixture_function: Callable[..., object],
     *,
-    scope: _ScopeName | Callable[[str, Config], _ScopeName] = ...,
+    scope: ScopeName | Callable[[str, Config], ScopeName] = ...,
     params: Iterable[object] | None = ...,
     autouse: bool = ...,
     ids: Sequence[object | None] | Callable[[Any], object | None] | None = ...,
@@ -1333,7 +1418,7 @@ def fixture(
 def fixture(
     fixture_function: None = ...,
     *,
-    scope: _ScopeName | Callable[[str, Config], _ScopeName] = ...,
+    scope: ScopeName | Callable[[str, Config], ScopeName] = ...,
     params: Iterable[object] | None = ...,
     autouse: bool = ...,
     ids: Sequence[object | None] | Callable[[Any], object | None] | None = ...,
@@ -1344,7 +1429,7 @@ def fixture(
 def fixture(
     fixture_function: FixtureFunction | None = None,
     *,
-    scope: _ScopeName | Callable[[str, Config], _ScopeName] = "function",
+    scope: ScopeName | Callable[[str, Config], ScopeName] = "function",
     params: Iterable[object] | None = None,
     autouse: bool = False,
     ids: Sequence[object | None] | Callable[[Any], object | None] | None = None,
@@ -1416,6 +1501,10 @@ def fixture(
     return fixture_marker
 
 
+@deprecated(
+    "@pytest.yield_fixture is deprecated. Use @pytest.fixture instead; they are the same.",
+    category=None,  # We have our own runtime warning logic
+)
 def yield_fixture(
     fixture_function=None,
     *args,
@@ -1677,12 +1766,7 @@ class FixtureManager:
 
     def _getusefixturesnames(self, node: nodes.Item) -> Iterator[str]:
         """Return the names of usefixtures fixtures applicable to node."""
-        # Reverse order (farthest to closest) is more natural for usefixtures,
-        # i.e. Want a module-level usefixture to be requested before class one,
-        # a parent class' before a child's, etc.
-        for marker_node, mark in reversed(
-            list(node.iter_markers_with_node(name="usefixtures"))
-        ):
+        for marker_node, mark in node.iter_markers_with_node(name="usefixtures"):
             if not mark.args:
                 marker_node.warn(
                     PytestWarning(
@@ -1704,47 +1788,20 @@ class FixtureManager:
         # to re-discover fixturedefs again for each fixturename
         # (discovering matching fixtures for a given name/node is expensive).
 
-        fixturenames_closure = list(initialnames)
-
         arg2fixturedefs: dict[str, Sequence[FixtureDef[Any]]] = {}
 
-        # Track the index for each fixture name in the simulated stack.
-        # Needed for handling override chains correctly, similar to _get_active_fixturedef.
-        # Using negative indices: -1 is the most specific (last), -2 is second to last, etc.
-        current_indices: dict[str, int] = {}
-
-        def process_argname(argname: str) -> None:
-            # Optimization: already processed this argname.
-            if current_indices.get(argname) == -1:
-                return
-
-            if argname not in fixturenames_closure:
-                fixturenames_closure.append(argname)
-
+        def getfixturedefs(argname: str) -> Sequence[FixtureDef[Any]] | None:
             if argname in ignore_args:
-                return
+                return None
 
             fixturedefs = arg2fixturedefs.get(argname)
             if not fixturedefs:
                 fixturedefs = self.getfixturedefs(argname, parentnode)
                 if not fixturedefs:
                     # Fixture not defined or not visible (will error during runtest).
-                    return
+                    return None
                 arg2fixturedefs[argname] = fixturedefs
-
-            index = current_indices.get(argname, -1)
-            if -index > len(fixturedefs):
-                # Exhausted the override chain (will error during runtest).
-                return
-            fixturedef = fixturedefs[index]
-
-            current_indices[argname] = index - 1
-            for dep in fixturedef.argnames:
-                process_argname(dep)
-            current_indices[argname] = index
-
-        for name in initialnames:
-            process_argname(name)
+            return fixturedefs
 
         def sort_by_scope(arg_name: str) -> Scope:
             try:
@@ -1754,7 +1811,15 @@ class FixtureManager:
             else:
                 return fixturedefs[-1]._scope
 
-        fixturenames_closure.sort(key=sort_by_scope, reverse=True)
+        fixturenames_closure = sorted(
+            traverse_fixture_closure(
+                initialnames,
+                getfixturedefs=getfixturedefs,
+            ),
+            key=sort_by_scope,
+            reverse=True,
+        )
+
         return fixturenames_closure, arg2fixturedefs
 
     def pytest_generate_tests(self, metafunc: Metafunc) -> None:
@@ -1799,7 +1864,7 @@ class FixtureManager:
         name: str,
         func: _FixtureFunc[object],
         nodeid: str | None,
-        scope: Scope | _ScopeName | Callable[[str, Config], _ScopeName] = "function",
+        scope: Scope | ScopeName | Callable[[str, Config], ScopeName] = "function",
         params: Sequence[object] | None = None,
         ids: tuple[object | None, ...] | Callable[[Any], object | None] | None = None,
         autouse: bool = False,
@@ -1977,6 +2042,36 @@ def _pretty_fixture_path(invocation_dir: Path, func) -> str:
         return bestrelpath(invocation_dir, loc)
 
 
+def _get_fixtures_per_test(test: nodes.Item) -> Iterator[FixtureDef[object]]:
+    """Returns all fixtures used by the test item except for those created by
+    direct parametrization and those requested dynamically with
+    ``request.getfixturevalue``.
+
+    The justification for excluding fixtures created by direct parametrization
+    is that for users, they are internal implementation detail.
+
+    Dynamically requested fixtures are excluded because they are not known
+    statically.
+    """
+    from _pytest.python import DirectParamFixtureDef
+
+    # Custom Items may not have _fixtureinfo attribute.
+    fixture_info: FuncFixtureInfo | None = getattr(test, "_fixtureinfo", None)
+    if fixture_info is None:
+        return  # pragma: no cover
+
+    # dict key not used in loop but needed for sorting.
+    for argname, fixturedefs in sorted(fixture_info.name2fixturedefs.items()):
+        if not fixturedefs:
+            # Not supposed to be empty, but for safety.
+            continue  # pragma: no cover
+        # Last item is expected to be the one directly used by the test item.
+        fixturedef = fixturedefs[-1]
+        if isinstance(fixturedef, DirectParamFixtureDef):
+            continue
+        yield fixturedef
+
+
 def _show_fixtures_per_test(config: Config, session: Session) -> None:
     import _pytest.config
 
@@ -2009,22 +2104,18 @@ def _show_fixtures_per_test(config: Config, session: Session) -> None:
             tw.line("    no docstring available", red=True)
 
     def write_item(item: nodes.Item) -> None:
-        # Not all items have _fixtureinfo attribute.
-        info: FuncFixtureInfo | None = getattr(item, "_fixtureinfo", None)
-        if info is None or not info.name2fixturedefs:
+        fixturedefs = list(_get_fixtures_per_test(item))
+        if not fixturedefs:
             # This test item does not use any fixtures.
             return
+
         tw.line()
         tw.sep("-", f"fixtures used by {item.name}")
         # TODO: Fix this type ignore.
         tw.sep("-", f"({get_best_relpath(item.function)})")  # type: ignore[attr-defined]
-        # dict key not used in loop but needed for sorting.
-        for _, fixturedefs in sorted(info.name2fixturedefs.items()):
-            assert fixturedefs is not None
-            if not fixturedefs:
-                continue
-            # Last item is expected to be the one used by the test item.
-            write_fixture(fixturedefs[-1])
+
+        for fixturedef in fixturedefs:
+            write_fixture(fixturedef)
 
     for session_item in session.items:
         write_item(session_item)

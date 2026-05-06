@@ -6,13 +6,14 @@ import os
 from pathlib import Path
 import sys
 import textwrap
+from unittest import result
 
 from _pytest.compat import getfuncargnames
 from _pytest.config import ExitCode
 from _pytest.fixtures import deduplicate_names
 from _pytest.fixtures import TopRequest
 from _pytest.monkeypatch import MonkeyPatch
-from _pytest.pytester import get_public_names
+from _pytest.pytester import get_public_names, pytester
 from _pytest.pytester import Pytester
 from _pytest.python import Function
 import pytest
@@ -5651,3 +5652,4 @@ def test_overridden_fixture_depends_on_parametrized(pytester: Pytester) -> None:
     )
     result = pytester.runpytest("-v")
     result.assert_outcomes(passed=1)
+
