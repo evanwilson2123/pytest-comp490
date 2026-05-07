@@ -18,3 +18,4 @@ def test_first(foo, bar):
 @pytest.mark.parametrize("foo", [2], indirect=True)
 def test_second(foo, bar):
     assert bar == 2
+    
